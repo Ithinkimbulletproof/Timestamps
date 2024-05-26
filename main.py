@@ -1,7 +1,7 @@
 from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, timedelta
-import time, sys, threading, signal
+import time, threading, sys, signal
 
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///timestamps.db"
@@ -14,31 +14,45 @@ class Timestamp(db.Model):
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
 
-def create_app():
-    with app.app_context():
-        db.create_all()
+class Models:
+    def __init__(self):
+        self.stop_event_add = threading.Event()
+        self.stop_event_delete = threading.Event()
 
-
-def add_timestamp(stop_event):
-    while not stop_event.is_set():
+    def create_app(self):
         with app.app_context():
-            timestamp = Timestamp()
-            db.session.add(timestamp)
-            db.session.commit()
-        time.sleep(5)
+            db.create_all()
 
+    def add_timestamp(self):
+        while not self.stop_event_add.is_set():
+            with app.app_context():
+                timestamp = Models()
+                db.session.add(timestamp)
+                db.session.commit()
+            time.sleep(5)
 
-def delete_old_timestamps(stop_event):
-    while not stop_event.is_set():
-        with app.app_context():
-            threshold = datetime.utcnow() - timedelta(minutes=1)
-            Timestamp.query.filter(
-                Timestamp.timestamp < threshold).delete()
-            db.session.commit()
-        time.sleep(10)
+    def delete_old_timestamps(self):
+        while not self.stop_event_delete.is_set():
+            with app.app_context():
+                threshold = datetime.utcnow() - timedelta(minutes=1)
+                Timestamp.query.filter(Timestamp.timestamp < threshold).delete()
+                db.session.commit()
+            time.sleep(10)
 
-stop_event_add = threading.Event()
-stop_event_delete = threading.Event()
+    def start_threads(self):
+        first_thread = threading.Thread(target=self.add_timestamp)
+        second_thread = threading.Thread(target=self.delete_old_timestamps)
+        first_thread.start()
+        second_thread.start()
+        first_thread.join()
+        second_thread.join()
+
+    def signal_handler(self, sign, frame):
+        self.stop_event_add.set()
+        self.stop_event_delete.set()
+        print("Threads stopped")
+        sys.exit(0)
+
 
 @app.route("/timestamps", methods=["GET"])
 def get_timestamps():
@@ -50,32 +64,16 @@ def get_timestamps():
         }
         for stamp in timestamps])
 
-
 @app.route("/timestamps", methods=["DELETE"])
 def delete_timestamps():
     db.session.query(Timestamp).delete()
     db.session.commit()
     return "", 204
 
-def signal_handler(sign, frame):
-    stop_event_add.set()
-    stop_event_delete.set()
-    print("Поток остановлен")
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
 if __name__ == '__main__':
-    create_app()
-    first_thread = threading.Thread(target=add_timestamp,
-                                    args=(stop_event_add,),
-                                    daemon=True)
-    second_thread = threading.Thread(target=delete_old_timestamps,
-                                     args=(stop_event_delete,),
-                                     daemon=True)
-    first_thread.start()
-    second_thread.start()
+    manager_class = Models()
+    signal.signal(signal.SIGINT, manager_class.signal_handler)
+    signal.signal(signal.SIGTERM, manager_class.signal_handler)
+    manager_class.create_app()
+    manager_class.start_threads()
     app.run(debug=True)
-    first_thread.join()
-    second_thread.join()
